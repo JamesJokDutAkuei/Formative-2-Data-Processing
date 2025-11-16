@@ -21,7 +21,8 @@ scripts when new data becomes available.
 ├── data/
 │   └── processed/
 │       ├── audio_features.csv      # MFCC-style tabular voice features
-│       └── image_features.csv      # image feature metadata / class labels
+│       ├── image_features.csv      # image feature metadata / class labels
+│       └── merged_dataset.csv      # merged customer transactions + social profile features
 ├── models/
 │   ├── face_authentication_model.keras
 │   ├── voice_auth_model_5class.h5        # legacy CNN fallback
@@ -73,10 +74,25 @@ to authenticate faces without it.
 
 ## Running the Demo CLI
 
+### Sequential (interactive) flow
+
+```bash
+python src/demo_cli.py --interactive
+```
+
+The script now prompts in the same order shown in the assignment flow diagram:
+
+1. **Face image path** → runs the MobileNetV2 head and blocks if confidence < 70 % or the class resolves to `unknown`.
+2. **Customer ID + merged CSV** (optional) → loads `models/recommender_pipeline.pkl` to score real products; otherwise falls back to stub items.
+3. **Voice filename** → applies the MLP (`voice_auth_model_v2.pkl`) with a 0.6 probability threshold and enforces identity parity with the face label.
+4. **Display output** → prints `ACCESS GRANTED` + recommendations only when both biometrics pass.
+
 ```bash
 python src/demo_cli.py \
   --face assets/demo_faces/demo-2.jpeg \
-  --voice James_confirm_1.m4a
+  --voice James_confirm_1.m4a \
+  --recommender-customer-id 151 \
+  --merged-csv data/processed/merged_dataset.csv
 ```
 
 The CLI will:
@@ -87,8 +103,8 @@ The CLI will:
 - load `data/processed/audio_features.csv`, apply the saved scaler, and predict
   a speaker label with `voice_auth_model_v2.pkl` (falling back to the legacy
   CNN if the new model is absent)
-- deny access if face/voice predictions disagree—unless the voice result is the
-  explicit `unknown` class
+- deny access if face/voice predictions disagree or if either modality resolves
+  to the explicit `unknown` class
 - attempt to produce real product recommendations via
   `models/recommender_pipeline.pkl`, otherwise emit deterministic stub items
 
@@ -103,6 +119,22 @@ Both flags are required for live recommendations. The CLI looks up the supplied
 customer row inside the merged dataset, transforms the features via the stored
 pipeline, and reports the top predictions. If either flag is omitted, the CLI
 still grants access but falls back to the stub recommendations.
+
+---
+
+## Model Metrics (latest training run)
+
+- **Voice MLP (`train_voice_model_v2.py`)**: validation accuracy 0.727 (see
+  `models/voice_model_v2_metrics.json` for the full JSON record and feature
+  column order). Holds ≥0.97 probability on fresh recordings for enrolled
+  speakers and forces denial when the label resolves to `unknown`.
+- **Product Recommender (`train_recommender.py --merged data/processed/merged_dataset.csv`)**:
+  logistic regression is currently persisted (accuracy 0.614, F1-weighted 0.566,
+  log-loss 1.149, top-3 accuracy 0.864). RandomForest and XGBoost scores are
+  printed during training for comparison.
+- **Face model**: MobileNetV2 head stored in
+  `models/face_authentication_model.keras`. Empirically returns ≥95 % confidence
+  on new expressions from enrolled users and <70 % on foreign faces (denied).
 
 ---
 
@@ -121,6 +153,13 @@ JSON. The metrics file records the feature column order, which the CLI enforces
 during inference.
 
 ### Product Recommender
+
+```
+python src/train_recommender.py \
+  --merged data/processed/merged_dataset.csv
+```
+
+Or supply the original pair of CSVs:
 
 ```
 python src/train_recommender.py \
@@ -145,6 +184,10 @@ with its preprocessing steps.
 - `class_names.json` (if present at the repo root) should align with the face
   model output indices. When absent, the CLI derives class names from the
   `label` column in `image_features.csv`.
+- `data/processed/merged_dataset.csv` must retain the feature columns captured
+  during training and a customer identifier (e.g., `customer_id` or
+  `customer_id_new`) so the CLI can locate the correct record when
+  `--recommender-customer-id` is provided.
 - `models/recommender_pipeline.pkl` should contain the keys
   `preprocessor`, `model`, `label_encoder`, and `feature_columns` so the CLI can
   reproduce the exact feature engineering used at training time.
@@ -163,6 +206,9 @@ with its preprocessing steps.
   both before comparison but cannot map entirely different spellings.
 - **Stub recommendations appearing:** supply both `--recommender-customer-id`
   and `--merged-csv` so the pipeline can look up the correct row.
+- **Need a walkthrough for presentations:** run `python src/demo_cli.py --interactive`
+  to collect inputs sequentially, demo an unauthorized attempt (e.g., mismatched
+  voice), and then show the full pass scenario.
 
 ---
 
