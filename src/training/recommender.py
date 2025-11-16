@@ -45,6 +45,7 @@ def build_dataset(transactions: pd.DataFrame, social: pd.DataFrame) -> pd.DataFr
 
 
 def preprocess_and_train(merged: pd.DataFrame, tune: bool = False):
+    merged = merged.loc[:, ~merged.columns.str.contains("^Unnamed", case=False)]
     target_col = "product_category"
     if target_col not in merged.columns:
         raise RuntimeError(f"Expected target column `{target_col}` in merged data")
@@ -165,67 +166,79 @@ def preprocess_and_train(merged: pd.DataFrame, tune: bool = False):
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Train recommender from transactions + social CSVs")
-    parser.add_argument("--transactions", required=True, help="Path or URL to transactions CSV")
-    parser.add_argument("--social", required=True, help="Path or URL to social CSV")
+    parser = argparse.ArgumentParser(description="Train recommender from transactions + social CSVs or a merged CSV")
+    parser.add_argument("--transactions", required=False, help="Path or URL to transactions CSV")
+    parser.add_argument("--social", required=False, help="Path or URL to social CSV")
+    parser.add_argument("--merged", required=False, help="Path or URL to pre-merged CSV")
     parser.add_argument("--tune", action="store_true", help="Run lightweight hyperparameter tuning for RandomForest")
     args = parser.parse_args(argv)
 
-    print("Loading transactions...")
-    tx = load_csv(args.transactions)
-    print("Loading social...")
-    so = load_csv(args.social)
-    print("Merging...")
-    merged = build_dataset(tx, so)
+    if args.merged:
+        print("Loading merged dataset...")
+        merged = load_csv(args.merged)
+        merged = merged.loc[:, ~merged.columns.str.contains("^Unnamed", case=False)]
+        tx = None
+    else:
+        if not (args.transactions and args.social):
+            raise SystemExit("Please supply either --merged or both --transactions and --social")
+        print("Loading transactions...")
+        tx = load_csv(args.transactions)
+        print("Loading social...")
+        so = load_csv(args.social)
+        print("Merging...")
+        merged = build_dataset(tx, so)
 
     print("Computing customer aggregates (RFM) when possible...")
-    cust_keys = [c for c in tx.columns if "customer" in c.lower() or "id" in c.lower()]
-    date_candidates = [c for c in tx.columns if any(k in c.lower() for k in ["date", "time", "created"])]
-    amount_candidates = [c for c in tx.columns if any(k in c.lower() for k in ["amount", "price", "total", "value"])]
-    if cust_keys and date_candidates and amount_candidates:
-        ck = cust_keys[0]
-        dtc = date_candidates[0]
-        amt = amount_candidates[0]
-        try:
-            tx[dtc] = pd.to_datetime(tx[dtc], errors="coerce")
-            snapshot = tx[dtc].max()
-            rfm = tx.groupby(ck).agg(
-                recency_days=(dtc, lambda s: (snapshot - s.max()).days if pd.notnull(s.max()) else 9999),
-                frequency=(dtc, "count"),
-                monetary=(amt, "sum"),
-            ).reset_index()
-            product_cols = [c for c in tx.columns if any(k in c.lower() for k in ["product", "item", "sku"])]
-            if product_cols:
-                pcol = product_cols[0]
-                prod_counts = (
-                    tx.groupby(ck)[pcol]
-                    .nunique()
-                    .reset_index()
-                    .rename(columns={pcol: "unique_product_count"})
+    if tx is not None:
+        cust_keys = [c for c in tx.columns if "customer" in c.lower() or "id" in c.lower()]
+        date_candidates = [c for c in tx.columns if any(k in c.lower() for k in ["date", "time", "created"])]
+        amount_candidates = [c for c in tx.columns if any(k in c.lower() for k in ["amount", "price", "total", "value"])]
+        if cust_keys and date_candidates and amount_candidates:
+            ck = cust_keys[0]
+            dtc = date_candidates[0]
+            amt = amount_candidates[0]
+            try:
+                tx[dtc] = pd.to_datetime(tx[dtc], errors="coerce")
+                snapshot = tx[dtc].max()
+                rfm = tx.groupby(ck).agg(
+                    recency_days=(dtc, lambda s: (snapshot - s.max()).days if pd.notnull(s.max()) else 9999),
+                    frequency=(dtc, "count"),
+                    monetary=(amt, "sum"),
+                ).reset_index()
+                product_cols = [c for c in tx.columns if any(k in c.lower() for k in ["product", "item", "sku"])]
+                if product_cols:
+                    pcol = product_cols[0]
+                    prod_counts = (
+                        tx.groupby(ck)[pcol]
+                        .nunique()
+                        .reset_index()
+                        .rename(columns={pcol: "unique_product_count"})
+                    )
+                    last_prod = (
+                        tx.sort_values(dtc)
+                        .groupby(ck)[pcol]
+                        .last()
+                        .reset_index()
+                        .rename(columns={pcol: "last_product"})
+                    )
+                    rfm = rfm.merge(prod_counts, on=ck, how="left")
+                    rfm = rfm.merge(last_prod, on=ck, how="left")
+                merge_keys = [c for c in merged.columns if ck.lower() in c.lower() or "customer" in c.lower()]
+                if merge_keys:
+                    mk = merge_keys[0]
+                    merged = merged.merge(rfm, left_on=mk, right_on=ck, how="left")
+                else:
+                    merged = merged.merge(rfm, left_on=ck, right_on=ck, how="left")
+                print(
+                    "RFM merged. Added columns:",
+                    [c for c in ["recency_days", "frequency", "monetary"] if c in merged.columns],
                 )
-                last_prod = (
-                    tx.sort_values(dtc)
-                    .groupby(ck)[pcol]
-                    .last()
-                    .reset_index()
-                    .rename(columns={pcol: "last_product"})
-                )
-                rfm = rfm.merge(prod_counts, on=ck, how="left")
-                rfm = rfm.merge(last_prod, on=ck, how="left")
-            merge_keys = [c for c in merged.columns if ck.lower() in c.lower() or "customer" in c.lower()]
-            if merge_keys:
-                mk = merge_keys[0]
-                merged = merged.merge(rfm, left_on=mk, right_on=ck, how="left")
-            else:
-                merged = merged.merge(rfm, left_on=ck, right_on=ck, how="left")
-            print(
-                "RFM merged. Added columns:",
-                [c for c in ["recency_days", "frequency", "monetary"] if c in merged.columns],
-            )
-        except Exception as exc:
-            print("RFM computation failed:", exc)
+            except Exception as exc:
+                print("RFM computation failed:", exc)
+        else:
+            print("RFM not computed: needed customer/date/amount columns not found.")
     else:
-        print("RFM not computed: needed customer/date/amount columns not found.")
+        print("RFM step skipped (merged dataset supplied).")
 
     print("Training candidate models...")
     results, model_path, pipeline_path = preprocess_and_train(merged, tune=args.tune)
