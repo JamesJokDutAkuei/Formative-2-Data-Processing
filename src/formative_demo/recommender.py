@@ -36,13 +36,17 @@ def generate_recommendations(
     top_k: int = 3,
 ) -> Sequence[dict]:
     merged = pd.read_csv(merged_csv)
+    merged = merged.loc[:, ~merged.columns.str.contains("^Unnamed", case=False)]
     key_cols = [c for c in merged.columns if "customer" in c.lower() or "id" in c.lower()]
-    if key_cols:
-        key = key_cols[0]
-        row = merged[merged[key].astype(str) == str(customer_id)]
-    else:
-        first_col = merged.columns[0]
-        row = merged[merged[first_col].astype(str) == str(customer_id)]
+    preferred_keys = [
+        "customer_id",
+        "customer_id_new",
+        "customer_id_common",
+        "customer_id_legacy",
+        "customer",
+    ]
+    key = next((k for k in preferred_keys if k in merged.columns), key_cols[0] if key_cols else merged.columns[0])
+    row = merged[merged[key].astype(str) == str(customer_id)]
 
     if row.shape[0] == 0:
         return recommend_stub()
