@@ -172,7 +172,6 @@ The training module merges customer data, builds a preprocessing pipeline
 (numeric scaling + categorical one-hot encoding), evaluates Random Forest,
 Logistic Regression, and optionally XGBoost, and persists the best model along
 with its preprocessing steps.
-
 ---
 
 ## Data & Artefact Contracts
